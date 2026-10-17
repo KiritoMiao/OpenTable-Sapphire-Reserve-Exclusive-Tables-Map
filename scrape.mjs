@@ -7,7 +7,10 @@ const SAPPHIRE_URL = `${BASE_URL}/sapphire-reserve-exclusive-tables`;
 
 // No hardcoded city list — all cities are discovered dynamically from the website
 
-// Nominatim geocoding with 1 req/sec rate limit
+// Cache identical queries within a run, including misses, across city listings.
+const geocodeCache = new Map();
+
+// Nominatim geocoding with 1 req/sec rate limit and bounded requests.
 async function geocode(name, neighborhood, city) {
   const queries = [
     `${name} restaurant, ${neighborhood}, ${city}, USA`,
@@ -16,19 +19,28 @@ async function geocode(name, neighborhood, city) {
   ];
 
   for (const query of queries) {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1&countrycodes=us`;
-    try {
-      const res = await fetch(url, {
-        headers: { 'User-Agent': 'OpenTableSapphireMapScraper/1.0' }
-      });
-      const data = await res.json();
-      if (data.length > 0) {
-        return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+    if (!geocodeCache.has(query)) {
+      await sleep(1100); // Only actual requests consume the Nominatim rate limit.
+      const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1&countrycodes=us`;
+      let coords = null;
+      try {
+        const res = await fetch(url, {
+          headers: { 'User-Agent': 'OpenTableSapphireMapScraper/1.0' },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.length > 0) {
+            coords = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+          }
+        }
+      } catch (e) {
+        // A failed or timed-out request can fall back to the next query.
       }
-    } catch (e) {
-      // try next query
+      geocodeCache.set(query, coords);
     }
-    await sleep(1100);
+    const coords = geocodeCache.get(query);
+    if (coords) return coords;
   }
 
   return null;
@@ -36,6 +48,12 @@ async function geocode(name, neighborhood, city) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Ignore tracking parameters while keeping separate locations distinct.
+function locationKey(restaurant) {
+  const url = new URL(restaurant.url);
+  return JSON.stringify([url.origin + url.pathname.replace(/\/$/, ''), restaurant.city, restaurant.neighborhood]);
 }
 
 // Format city name from slug — fully dynamic, no hardcoded map
@@ -259,14 +277,31 @@ async function main() {
 
   console.log(`\n=== Scraping complete: ${allRestaurants.length} restaurants total ===`);
 
-  // Step 3: Geocode
-  console.log('\nGeocoding restaurants (this may take a few minutes)...');
+  // Step 3: Reuse saved coordinates; geocode only new or unresolved locations.
+  const outDir = path.join(process.cwd(), 'data');
+  const outPath = path.join(outDir, 'restaurants.json');
+  const savedRestaurants = fs.existsSync(outPath) ? JSON.parse(fs.readFileSync(outPath, 'utf8')) : [];
+  const coordinates = new Map();
+  for (const r of savedRestaurants) {
+    if (Number.isFinite(r.lat) && Number.isFinite(r.lng)) {
+      coordinates.set(locationKey(r), { lat: r.lat, lng: r.lng });
+    }
+  }
+
+  console.log('\nGeocoding new or unresolved restaurants; reusing saved coordinates...');
   let geocoded = 0;
+  let reused = 0;
   let failed = 0;
 
   for (const r of allRestaurants) {
-    await sleep(1100); // Nominatim rate limit: 1 req/sec
-    const coords = await geocode(r.name, r.neighborhood, r.city);
+    const key = locationKey(r);
+    let coords = coordinates.get(key);
+    if (coords) {
+      reused++;
+    } else if (!coordinates.has(key)) {
+      coords = await geocode(r.name, r.neighborhood, r.city);
+      coordinates.set(key, coords);
+    }
     if (coords) {
       r.lat = coords.lat;
       r.lng = coords.lng;
@@ -280,13 +315,11 @@ async function main() {
     }
   }
 
-  console.log(`\nGeocoded: ${geocoded}/${allRestaurants.length} (${failed} failed)`);
+  console.log(`\nGeocoded: ${geocoded}/${allRestaurants.length} (${reused} reused, ${failed} failed)`);
 
-  // Step 4: Save
-  const outDir = path.join(process.cwd(), 'data');
+  // Step 4: Save coordinates with the data for the next run.
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
-  const outPath = path.join(outDir, 'restaurants.json');
   fs.writeFileSync(outPath, JSON.stringify(allRestaurants, null, 2));
   console.log(`\nSaved to ${outPath}`);
 

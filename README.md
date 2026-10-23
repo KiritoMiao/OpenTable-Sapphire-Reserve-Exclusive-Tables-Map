@@ -2,7 +2,7 @@
 
 Interactive map of all Chase Sapphire Reserve Exclusive Tables restaurants across the US.
 
-**[View Live Map](https://kiritomiao.github.io/csr-et/)**
+**[View Live Map](https://csr-et.kirito.moe/)**
 
 ## Features
 
@@ -32,7 +32,7 @@ The scraper automatically discovers all available cities from OpenTable's city s
 
 ## Tech Stack
 
-- [Leaflet.js](https://leafletjs.com/) + [CARTO](https://carto.com/) tiles
+- [Leaflet.js](https://leafletjs.com/) + [OpenStreetMap](https://www.openstreetmap.org/) tiles (no API key required)
 - [Puppeteer](https://pptr.dev/) for scraping
 - [Nominatim](https://nominatim.org/) for geocoding
 - GitHub Pages for hosting
